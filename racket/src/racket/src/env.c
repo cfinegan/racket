@@ -31,6 +31,7 @@
 #include "schminc.h"
 #include "schmach.h"
 #include "schexpobs.h"
+#include "schrktio.h"
 #ifdef MZ_USE_FUTURES
 # include "future.h"
 #endif
@@ -177,15 +178,6 @@ void os_platform_init() {
     setrlimit(RLIMIT_STACK, &rl);
   }
 #endif
-#ifdef UNIX_LIMIT_FDSET_SIZE
-  struct rlimit rl;
-
-  getrlimit(RLIMIT_NOFILE, &rl);
-  if (rl.rlim_cur > FD_SETSIZE) {
-    rl.rlim_cur = FD_SETSIZE;
-    setrlimit(RLIMIT_NOFILE, &rl);
-  }
-#endif
 }
 
 Scheme_Env *scheme_restart_instance() {
@@ -300,10 +292,6 @@ Scheme_Env *scheme_engine_instance_init()
 
   scheme_init_compenv_symbol();
   scheme_init_param_symbol();
-
-#if defined(MZ_PLACES_WAITPID)
-  scheme_places_start_child_signal_handler();
-#endif
 
 #if defined(MZ_PRECISE_GC) && defined(MZ_USE_PLACES)
   GC_switch_out_master_gc();
@@ -546,6 +534,7 @@ static Scheme_Env *place_instance_init(void *stack_base, int initial_main_os_thr
   scheme_init_error_escape_proc(NULL);
   scheme_init_print_buffers_places();
   scheme_init_thread_places();
+  scheme_init_fd_semaphores();
   scheme_init_string_places();
   scheme_init_logger();
   scheme_init_eval_places();
@@ -553,8 +542,6 @@ static Scheme_Env *place_instance_init(void *stack_base, int initial_main_os_thr
   scheme_init_regexp_places();
   scheme_init_sema_places();
   scheme_init_gmp_places();
-  scheme_init_kqueue();
-  scheme_alloc_global_fdset();
 #ifndef DONT_USE_FOREIGN
   scheme_init_foreign_places();
 #endif
@@ -574,9 +561,7 @@ static Scheme_Env *place_instance_init(void *stack_base, int initial_main_os_thr
 
 /* BEGIN PRIMITIVE MODULES */
   scheme_init_linklet(env);
-#ifndef NO_TCP_SUPPORT
   scheme_init_network(env);
-#endif
   scheme_init_paramz(env);
   scheme_init_expand_observe(env);
   scheme_init_place(env);
@@ -625,10 +610,13 @@ Scheme_Env *scheme_place_instance_init(void *stack_base, struct NewGC *parent_gc
   int *signal_fd;
   GC_construct_child_gc(parent_gc, memory_limit);
 # endif
+  scheme_rktio = rktio_init();
   env = place_instance_init(stack_base, 0);
 # if defined(MZ_PRECISE_GC)
-  signal_fd = scheme_get_signal_handle();
-  GC_set_put_external_event_fd(signal_fd);
+  if (scheme_rktio) {
+    signal_fd = scheme_get_signal_handle();
+    GC_set_put_external_event_fd(signal_fd);
+  }
 # endif
   scheme_set_can_break(1);
   return env; 
@@ -659,10 +647,8 @@ void scheme_place_instance_destroy(int force)
   else
     scheme_run_atexit_closers_on_all(force_more_closed_after);
 
-#ifdef WINDOWS_PROCESSES
-  scheme_release_process_job_object();
-#endif
-
+  scheme_release_fd_semaphores();
+  
   scheme_release_file_descriptor();
 
   scheme_end_futures_per_place();
@@ -674,9 +660,7 @@ void scheme_place_instance_destroy(int force)
   GC_destruct_child_gc();
 #endif
   scheme_free_all_code();
-  scheme_free_ghbn_data();
-  scheme_release_kqueue();
-  scheme_release_inotify();
+  rktio_destroy(scheme_rktio);
 }
 
 static void make_kernel_env(void)

@@ -4975,8 +4975,12 @@
   (set! s? f) ; break the JIT's optimistic assumption
   
   (define (go)
+    (define init-size
+      (let ([vec (make-vector 6)])
+        (vector-set-performance-stats! vec (current-thread))
+        (vector-ref vec 3)))
     (define size (f 500000)) ; make sure that this still leads to a tail loop
-    (size . < . 80000)))
+    ((- size init-size) . < . 20000)))
 
 (test #t (dynamic-require ''check-tail-call-by-jit-for-struct-predicate 'go))
 
@@ -6007,6 +6011,37 @@
     (for ([i 0])
       (for ([s (in-list 'obviously-not-a-list)])
         (unknown random-configuration)))))
+
+;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Make sure the expander and compiler don't go quadratic
+;; for
+;;  (lambda (arg-id ...) (define def-id _rhs) ... (arg-id def-id) ...)
+
+(let ()
+  (define (gensym-n n)
+    (let loop ([i n])
+      (if (zero? i)
+          '()
+          (cons (gensym) (loop (sub1 i))))))
+
+  (define (time-it n)
+    (let ([start (current-process-milliseconds)])
+      (let* ([args (gensym-n n)]
+             [defns (gensym-n n)])
+        (eval
+         `(lambda ,args
+            ,@(map (lambda (defn) `(define ,defn ',defn)) defns)
+            ,@(map (lambda (arg defn) `(,arg ,defn)) args defns))))
+      (- (current-process-milliseconds) start)))
+
+  (let loop ([tries 3])
+    (let ([a (time-it 100)]
+          [b (time-it 1000)])
+      ;; n lg(n) is ok, n^2 is not
+      (when (b . > . (* 50 a))
+        (if (zero? tries)
+            (test 'fail "compilation took too long" (/ b a 1.0))
+            (loop (sub1 tries)))))))
 
 ;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
